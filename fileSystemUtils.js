@@ -654,6 +654,11 @@ function deleteFolder(path, force) {
  * @param {string|string[]} [filterExtend] 扩展名过滤，例如 "xlsx" 或 ["xlsx", "xlsm"]；为空时不过滤扩展名。
  * @returns {Object.<string, {fileName: string, path: string, extend: string}>} 文件信息对象；键为文件名。
  *
+ * 返回格式：
+ * {
+ *   "demo.xlsx": { fileName: "demo.xlsx", path: "D:\\test\\demo.xlsx", extend: "xlsx" }
+ * }
+ *
  * @example
  * var files = getFilesByPath("D:\\test", ["公司"], ["~$"], ["xlsx", "xls", "xlsm"]);
  */
