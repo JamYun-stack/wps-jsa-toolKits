@@ -431,6 +431,233 @@ function getFileModifiedTime(path) {
 }
 
 /**
+ * 获取文件夹最后修改时间。
+ * 文件夹时间主要依赖 Windows FileSystemObject，因为 WPS/JSA 常用内置函数没有直接的目录时间接口。
+ *
+ * @param {string} path 文件夹路径。
+ * @returns {Date|string} 文件夹最后修改时间；文件夹不存在或读取失败时返回空字符串。
+ */
+function getFolderModifiedTime(path) {
+    if (!folderExists(path)) {
+        return "";
+    }
+
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        return fso.GetFolder(String(path)).DateLastModified;
+    } catch (error) {
+        return "";
+    }
+}
+
+/**
+ * 读取文本文件内容。
+ * 文本读取主要依赖 Windows ActiveX 文本流对象，因为 WPS/JSA 没有通用的带编码文本读取接口。
+ *
+ * @param {string} path 文本文件路径。
+ * @param {string} [charset] 文本编码，例如 "utf-8"、"unicode"。
+ * @returns {string} 文本内容；文件不存在或读取失败时返回空字符串。
+ */
+function readTextFile(path, charset) {
+    if (!fileExists(path)) {
+        return "";
+    }
+
+    var targetPath = String(path);
+    var fileCharset = _fsuNormalizeCharset(charset);
+
+    try {
+        var stream = new ActiveXObject("ADODB.Stream");
+        stream.Type = 2;
+        stream.Mode = 3;
+        stream.Charset = fileCharset;
+        stream.Open();
+        stream.LoadFromFile(targetPath);
+        var text = String(stream.ReadText(-1));
+        stream.Close();
+        return text;
+    } catch (error) {
+        try {
+            var fso = new ActiveXObject("Scripting.FileSystemObject");
+            var format = fileCharset === "unicode" ? -1 : 0;
+            var textFile = fso.OpenTextFile(targetPath, 1, false, format);
+            var fallbackText = String(textFile.ReadAll());
+            textFile.Close();
+            return fallbackText;
+        } catch (fallbackError) {
+            return "";
+        }
+    }
+}
+
+/**
+ * 写入文本文件内容，并在需要时自动创建目标父目录。
+ * 文本写入主要依赖 Windows ActiveX 文本流对象，因为 WPS/JSA 没有通用的带编码文本写入接口。
+ *
+ * @param {string} path 文本文件路径。
+ * @param {*} text 要写入的文本内容。
+ * @param {boolean} [overwrite] 目标文件存在时是否覆盖；只有 true 会覆盖。
+ * @param {string} [charset] 文本编码，例如 "utf-8"、"unicode"。
+ * @returns {boolean} 写入成功时返回 true，否则返回 false。
+ */
+function writeTextFile(path, text, overwrite, charset) {
+    if (!path) {
+        return false;
+    }
+
+    var targetPath = String(path);
+    var fileCharset = _fsuNormalizeCharset(charset);
+
+    if (fileExists(targetPath) && overwrite !== true) {
+        return false;
+    }
+
+    if (!ensureParentFolder(targetPath)) {
+        return false;
+    }
+
+    try {
+        var stream = new ActiveXObject("ADODB.Stream");
+        stream.Type = 2;
+        stream.Mode = 3;
+        stream.Charset = fileCharset;
+        stream.Open();
+        stream.WriteText(String(text === null || text === undefined ? "" : text));
+        stream.Position = 0;
+        stream.SaveToFile(targetPath, overwrite === true ? 2 : 1);
+        stream.Close();
+        return fileExists(targetPath);
+    } catch (error) {
+        try {
+            var fso = new ActiveXObject("Scripting.FileSystemObject");
+            var createNew = overwrite === true ? true : !fso.FileExists(targetPath);
+            var textFile = fso.CreateTextFile(targetPath, createNew, fileCharset === "unicode");
+            textFile.Write(String(text === null || text === undefined ? "" : text));
+            textFile.Close();
+            return fso.FileExists(targetPath);
+        } catch (fallbackError) {
+            return false;
+        }
+    }
+}
+
+/**
+ * 读取 JSON 文件内容并解析为对象。
+ *
+ * @param {string} path JSON 文件路径。
+ * @param {string} [charset] 文本编码，例如 "utf-8"。
+ * @returns {*} 解析后的对象或数组；读取失败、文件为空或解析失败时返回 null。
+ */
+function readJsonFile(path, charset) {
+    var text = readTextFile(path, charset);
+
+    if (text === "") {
+        return null;
+    }
+
+    try {
+        if (typeof JSON !== "undefined" && JSON.parse) {
+            return JSON.parse(text);
+        }
+
+        return eval("(" + text + ")");
+    } catch (error) {
+        return null;
+    }
+}
+
+/**
+ * 把对象或数组写入 JSON 文件，并在需要时自动创建目标父目录。
+ *
+ * @param {string} path JSON 文件路径。
+ * @param {*} data 要写入的对象、数组或基础值。
+ * @param {boolean} [overwrite] 目标文件存在时是否覆盖；只有 true 会覆盖。
+ * @param {number} [indent] JSON 缩进空格数；默认 4。
+ * @param {string} [charset] 文本编码，例如 "utf-8"。
+ * @returns {boolean} 写入成功时返回 true，否则返回 false。
+ */
+function writeJsonFile(path, data, overwrite, indent, charset) {
+    var spaceCount = Number(indent);
+
+    if (!isFinite(spaceCount) || spaceCount < 0) {
+        spaceCount = 4;
+    }
+
+    try {
+        if (typeof JSON === "undefined" || !JSON.stringify) {
+            return false;
+        }
+
+        return writeTextFile(path, JSON.stringify(data, null, spaceCount), overwrite, charset);
+    } catch (error) {
+        return false;
+    }
+}
+
+/**
+ * 在文件基础名后追加后缀，并保留原扩展名。
+ *
+ * @param {string} path 原始文件路径。
+ * @param {string} suffix 追加到基础名后的后缀文本。
+ * @returns {string} 追加后缀后的文件路径；原始路径为空时返回空字符串。
+ */
+function appendBaseNameSuffix(path, suffix) {
+    if (!path) {
+        return "";
+    }
+
+    var targetPath = _fsuNormalizePath(path);
+    var parentPath = getParentFolderPath(targetPath);
+    var fileName = getPathName(targetPath);
+    var baseName = getFileBaseName(fileName);
+    var extend = getFileExtend(fileName);
+    var nextName = baseName + String(suffix || "");
+
+    if (extend !== "") {
+        nextName = nextName + "." + extend;
+    }
+
+    if (parentPath === "") {
+        return nextName;
+    }
+
+    return joinPath(parentPath, nextName);
+}
+
+/**
+ * 生成一个当前不存在的文件路径；若原路径不存在，则直接返回原路径。
+ *
+ * @param {string} path 原始文件路径。
+ * @param {string} [separator] 基础名与序号之间的分隔符；默认 "_"。
+ * @param {number} [startIndex] 起始序号；默认 1。
+ * @returns {string} 不与现有文件或文件夹冲突的文件路径；原始路径为空时返回空字符串。
+ */
+function ensureUniqueFilePath(path, separator, startIndex) {
+    if (!path) {
+        return "";
+    }
+
+    var targetPath = _fsuNormalizePath(path);
+    var suffixSeparator = separator === undefined ? "_" : String(separator);
+    var index = Number(startIndex);
+
+    if (!isFinite(index) || index < 1) {
+        index = 1;
+    }
+
+    if (!fileExists(targetPath) && !folderExists(targetPath)) {
+        return targetPath;
+    }
+
+    while (fileExists(targetPath) || folderExists(targetPath)) {
+        targetPath = appendBaseNameSuffix(path, suffixSeparator + _fsuPadNumber(index, 3));
+        index = index + 1;
+    }
+
+    return targetPath;
+}
+
+/**
  * 复制文件，并在需要时自动创建目标父目录。
  * 优先使用 WPS/JSA 的 FileCopy，失败后再使用 Windows FileSystemObject。
  *
@@ -771,6 +998,159 @@ function listFoldersByPath(path, filterName, filterIgnore) {
 }
 
 /**
+ * 判断文件夹是否为空；同时没有直接子文件和直接子文件夹时视为空目录。
+ *
+ * @param {string} path 文件夹路径。
+ * @returns {boolean} 文件夹存在且没有直接子文件和子文件夹时返回 true，否则返回 false。
+ */
+function isEmptyFolder(path) {
+    if (!folderExists(path)) {
+        return false;
+    }
+
+    var files = getFilesByPath(path);
+    var folders = getFoldersByPath(path);
+
+    return _fsuGetObjectKeys(files).length === 0 && _fsuGetObjectKeys(folders).length === 0;
+}
+
+/**
+ * 递归列出目录及其子目录中的文件。
+ * 递归枚举会先尝试 WPS/JSA 的 Dir + GetAttr；若失败则退回 Windows FileSystemObject。
+ *
+ * @param {string} path 要扫描的文件夹路径。
+ * @param {string|string[]} [filterName] 文件名必须包含的关键字；为空时不过滤。
+ * @param {string|string[]} [filterIgnore] 文件名中需要排除的关键字；为空时不排除。
+ * @param {string|string[]} [filterExtend] 扩展名过滤；为空时不过滤扩展名。
+ * @returns {Array.<{fileName: string, path: string, extend: string}>} 文件信息数组；失败时返回空数组。
+ *
+ * 返回格式：
+ * [
+ *   { fileName: "demo.xlsx", path: "D:\\test\\2026\\demo.xlsx", extend: "xlsx" }
+ * ]
+ */
+function walkFilesRecursive(path, filterName, filterIgnore, filterExtend) {
+    var result = [];
+
+    if (!folderExists(path)) {
+        return result;
+    }
+
+    var basePath = _fsuTrimRightSlash(String(path));
+    var nameFilters = _fsuToStringArray(filterName);
+    var ignoreFilters = _fsuToLowerStringArray(filterIgnore);
+    var extendFilters = _fsuToLowerStringArray(filterExtend);
+
+    try {
+        _fsuWalkFilesRecursiveByDir(basePath, nameFilters, ignoreFilters, extendFilters, result);
+        return result;
+    } catch (error) {
+        return _fsuWalkFilesRecursiveByFso(basePath, nameFilters, ignoreFilters, extendFilters);
+    }
+}
+
+/**
+ * 递归查找目录及其子目录中的文件，是 walkFilesRecursive 的语义化别名。
+ *
+ * @param {string} path 要扫描的文件夹路径。
+ * @param {string|string[]} [filterName] 文件名必须包含的关键字；为空时不过滤。
+ * @param {string|string[]} [filterIgnore] 文件名中需要排除的关键字；为空时不排除。
+ * @param {string|string[]} [filterExtend] 扩展名过滤；为空时不过滤扩展名。
+ * @returns {Array.<{fileName: string, path: string, extend: string}>} 文件信息数组；失败时返回空数组。
+ */
+function findFilesRecursive(path, filterName, filterIgnore, filterExtend) {
+    return walkFilesRecursive(path, filterName, filterIgnore, filterExtend);
+}
+
+/**
+ * 递归列出目录及其子目录中的文件夹。
+ *
+ * @param {string} path 要扫描的文件夹路径。
+ * @param {string|string[]} [filterName] 文件夹名必须包含的关键字；为空时不过滤。
+ * @param {string|string[]} [filterIgnore] 文件夹名中需要排除的关键字；为空时不排除。
+ * @returns {Array.<{folderName: string, path: string}>} 文件夹信息数组；失败时返回空数组。
+ *
+ * 返回格式：
+ * [
+ *   { folderName: "2026", path: "D:\\test\\2026" }
+ * ]
+ */
+function walkFoldersRecursive(path, filterName, filterIgnore) {
+    var result = [];
+
+    if (!folderExists(path)) {
+        return result;
+    }
+
+    var basePath = _fsuTrimRightSlash(String(path));
+    var nameFilters = _fsuToStringArray(filterName);
+    var ignoreFilters = _fsuToLowerStringArray(filterIgnore);
+
+    try {
+        _fsuWalkFoldersRecursiveByDir(basePath, nameFilters, ignoreFilters, result);
+        return result;
+    } catch (error) {
+        return _fsuWalkFoldersRecursiveByFso(basePath, nameFilters, ignoreFilters);
+    }
+}
+
+/**
+ * 查找最新修改的文件。
+ *
+ * @param {string} path 要扫描的文件夹路径。
+ * @param {string|string[]} [filterName] 文件名必须包含的关键字；为空时不过滤。
+ * @param {string|string[]} [filterIgnore] 文件名中需要排除的关键字；为空时不排除。
+ * @param {string|string[]} [filterExtend] 扩展名过滤；为空时不过滤扩展名。
+ * @param {boolean} [includeSubFolders] 是否递归扫描子目录；为 true 时递归扫描。
+ * @returns {{fileName: string, path: string, extend: string, modifiedTime: Date|string}|null} 最新文件对象；未找到时返回 null。
+ *
+ * 返回格式：
+ * {
+ *   fileName: "demo.xlsx",
+ *   path: "D:\\test\\demo.xlsx",
+ *   extend: "xlsx",
+ *   modifiedTime: "2026-04-09 10:30:00"
+ * }
+ */
+function findNewestFile(path, filterName, filterIgnore, filterExtend, includeSubFolders) {
+    var files = includeSubFolders === true
+        ? walkFilesRecursive(path, filterName, filterIgnore, filterExtend)
+        : _fsuObjectToArray(getFilesByPath(path, filterName, filterIgnore, filterExtend));
+    var newest = null;
+    var newestTimestamp = -1;
+
+    for (var i = 0; i < files.length; i++) {
+        var modifiedTime = getFileModifiedTime(files[i].path);
+        var timestamp = _fsuDateToTimestamp(modifiedTime);
+
+        if (timestamp > newestTimestamp) {
+            newestTimestamp = timestamp;
+            newest = {
+                fileName: files[i].fileName,
+                path: files[i].path,
+                extend: files[i].extend,
+                modifiedTime: modifiedTime
+            };
+        }
+    }
+
+    return newest;
+}
+
+/**
+ * 按文件名关键字模式查找最新修改的文件。
+ *
+ * @param {string} path 要扫描的文件夹路径。
+ * @param {string|string[]} pattern 文件名必须包含的关键字模式。
+ * @param {boolean} [includeSubFolders] 是否递归扫描子目录；为 true 时递归扫描。
+ * @param {string|string[]} [filterExtend] 扩展名过滤；为空时不过滤扩展名。
+ * @returns {{fileName: string, path: string, extend: string, modifiedTime: Date|string}|null} 最新文件对象；未找到时返回 null。
+ */
+function findNewestFileByPattern(path, pattern, includeSubFolders, filterExtend) {
+    return findNewestFile(path, pattern, null, filterExtend, includeSubFolders);
+}
+
+/**
  * 使用 Windows FileSystemObject 枚举目录下的直接子文件，作为 Dir 枚举失败时的兜底实现。
  *
  * @private
@@ -842,6 +1222,307 @@ function _fsuGetFoldersByPathFallback(basePath, nameFilters, ignoreFilters) {
     }
 
     return result;
+}
+
+/**
+ * 使用 Dir + GetAttr 递归枚举文件。
+ *
+ * @private
+ * @param {string} basePath 当前扫描目录。
+ * @param {string[]} nameFilters 文件名过滤列表。
+ * @param {string[]} ignoreFilters 忽略过滤列表。
+ * @param {string[]} extendFilters 扩展名过滤列表。
+ * @param {Array.<{fileName: string, path: string, extend: string}>} result 结果数组。
+ * @returns {void}
+ */
+function _fsuWalkFilesRecursiveByDir(basePath, nameFilters, ignoreFilters, extendFilters, result) {
+    var entries = _fsuListEntriesByDir(basePath);
+    var i = 0;
+
+    for (i = 0; i < entries.files.length; i++) {
+        if (!_fsuIgnoreMatched(entries.files[i].fileName, ignoreFilters) && _fsuNameMatched(entries.files[i].fileName, nameFilters) && _fsuExtendMatched(entries.files[i].extend, extendFilters)) {
+            result.push(entries.files[i]);
+        }
+    }
+
+    for (i = 0; i < entries.folders.length; i++) {
+        _fsuWalkFilesRecursiveByDir(entries.folders[i].path, nameFilters, ignoreFilters, extendFilters, result);
+    }
+}
+
+/**
+ * 使用 Dir + GetAttr 递归枚举文件夹。
+ *
+ * @private
+ * @param {string} basePath 当前扫描目录。
+ * @param {string[]} nameFilters 名称过滤列表。
+ * @param {string[]} ignoreFilters 忽略过滤列表。
+ * @param {Array.<{folderName: string, path: string}>} result 结果数组。
+ * @returns {void}
+ */
+function _fsuWalkFoldersRecursiveByDir(basePath, nameFilters, ignoreFilters, result) {
+    var entries = _fsuListEntriesByDir(basePath);
+    var i = 0;
+
+    for (i = 0; i < entries.folders.length; i++) {
+        if (!_fsuIgnoreMatched(entries.folders[i].folderName, ignoreFilters) && _fsuNameMatched(entries.folders[i].folderName, nameFilters)) {
+            result.push(entries.folders[i]);
+        }
+
+        _fsuWalkFoldersRecursiveByDir(entries.folders[i].path, nameFilters, ignoreFilters, result);
+    }
+}
+
+/**
+ * 使用 Windows FileSystemObject 递归枚举文件。
+ *
+ * @private
+ * @param {string} basePath 当前扫描目录。
+ * @param {string[]} nameFilters 文件名过滤列表。
+ * @param {string[]} ignoreFilters 忽略过滤列表。
+ * @param {string[]} extendFilters 扩展名过滤列表。
+ * @returns {Array.<{fileName: string, path: string, extend: string}>} 文件结果数组。
+ */
+function _fsuWalkFilesRecursiveByFso(basePath, nameFilters, ignoreFilters, extendFilters) {
+    var result = [];
+
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        _fsuWalkFilesRecursiveByFsoFolder(fso.GetFolder(basePath), nameFilters, ignoreFilters, extendFilters, result);
+    } catch (error) {
+        return [];
+    }
+
+    return result;
+}
+
+/**
+ * 使用 Windows FileSystemObject 递归枚举文件夹。
+ *
+ * @private
+ * @param {string} basePath 当前扫描目录。
+ * @param {string[]} nameFilters 名称过滤列表。
+ * @param {string[]} ignoreFilters 忽略过滤列表。
+ * @returns {Array.<{folderName: string, path: string}>} 文件夹结果数组。
+ */
+function _fsuWalkFoldersRecursiveByFso(basePath, nameFilters, ignoreFilters) {
+    var result = [];
+
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        _fsuWalkFoldersRecursiveByFsoFolder(fso.GetFolder(basePath), nameFilters, ignoreFilters, result);
+    } catch (error) {
+        return [];
+    }
+
+    return result;
+}
+
+/**
+ * 使用 Windows FileSystemObject 递归枚举文件。
+ *
+ * @private
+ * @param {*} folder FSO 文件夹对象。
+ * @param {string[]} nameFilters 文件名过滤列表。
+ * @param {string[]} ignoreFilters 忽略过滤列表。
+ * @param {string[]} extendFilters 扩展名过滤列表。
+ * @param {Array.<{fileName: string, path: string, extend: string}>} result 结果数组。
+ * @returns {void}
+ */
+function _fsuWalkFilesRecursiveByFsoFolder(folder, nameFilters, ignoreFilters, extendFilters, result) {
+    var files = new Enumerator(folder.Files);
+    var folders = new Enumerator(folder.SubFolders);
+    var i = 0;
+
+    for (; !files.atEnd(); files.moveNext()) {
+        var file = files.item();
+        var fileName = String(file.Name);
+        var extend = _fsuGetFileExtend(fileName);
+
+        if (!_fsuIgnoreMatched(fileName, ignoreFilters) && _fsuNameMatched(fileName, nameFilters) && _fsuExtendMatched(extend, extendFilters)) {
+            result.push({
+                fileName: fileName,
+                path: String(file.Path),
+                extend: extend
+            });
+        }
+    }
+
+    for (; !folders.atEnd(); folders.moveNext()) {
+        _fsuWalkFilesRecursiveByFsoFolder(folders.item(), nameFilters, ignoreFilters, extendFilters, result);
+    }
+}
+
+/**
+ * 使用 Windows FileSystemObject 递归枚举文件夹。
+ *
+ * @private
+ * @param {*} folder FSO 文件夹对象。
+ * @param {string[]} nameFilters 名称过滤列表。
+ * @param {string[]} ignoreFilters 忽略过滤列表。
+ * @param {Array.<{folderName: string, path: string}>} result 结果数组。
+ * @returns {void}
+ */
+function _fsuWalkFoldersRecursiveByFsoFolder(folder, nameFilters, ignoreFilters, result) {
+    var folders = new Enumerator(folder.SubFolders);
+
+    for (; !folders.atEnd(); folders.moveNext()) {
+        var childFolder = folders.item();
+        var folderName = String(childFolder.Name);
+
+        if (!_fsuIgnoreMatched(folderName, ignoreFilters) && _fsuNameMatched(folderName, nameFilters)) {
+            result.push({
+                folderName: folderName,
+                path: String(childFolder.Path)
+            });
+        }
+
+        _fsuWalkFoldersRecursiveByFsoFolder(childFolder, nameFilters, ignoreFilters, result);
+    }
+}
+
+/**
+ * 使用 Dir + GetAttr 列出一个目录当前层的文件与文件夹。
+ *
+ * @private
+ * @param {string} basePath 当前扫描目录。
+ * @returns {{files: Array.<{fileName: string, path: string, extend: string}>, folders: Array.<{folderName: string, path: string}>}} 当前层文件与文件夹结果。
+ */
+function _fsuListEntriesByDir(basePath) {
+    var result = {
+        files: [],
+        folders: []
+    };
+    var name = Dir(basePath + "\\*");
+
+    while (name !== "") {
+        var fullPath = basePath + "\\" + name;
+
+        if (_fsuIsFolderPath(fullPath)) {
+            if (name !== "." && name !== "..") {
+                result.folders.push({
+                    folderName: name,
+                    path: fullPath
+                });
+            }
+        } else if (_fsuIsFilePath(fullPath)) {
+            result.files.push({
+                fileName: name,
+                path: fullPath,
+                extend: _fsuGetFileExtend(name)
+            });
+        }
+
+        name = Dir();
+    }
+
+    return result;
+}
+
+/**
+ * 标准化文本编码名称。
+ *
+ * @private
+ * @param {string} charset 输入编码名称。
+ * @returns {string} 标准化后的编码名称。
+ */
+function _fsuNormalizeCharset(charset) {
+    var text = String(charset || "").toLowerCase();
+
+    if (text === "" || text === "utf8") {
+        return "utf-8";
+    }
+
+    if (text === "utf-16" || text === "utf16") {
+        return "unicode";
+    }
+
+    return text;
+}
+
+/**
+ * 把数字补齐为固定长度字符串。
+ *
+ * @private
+ * @param {number} value 原始数字。
+ * @param {number} size 目标长度。
+ * @returns {string} 补齐后的数字字符串。
+ */
+function _fsuPadNumber(value, size) {
+    var text = String(Math.floor(Math.abs(Number(value) || 0)));
+
+    while (text.length < size) {
+        text = "0" + text;
+    }
+
+    return text;
+}
+
+/**
+ * 获取对象自有键列表。
+ *
+ * @private
+ * @param {Object} obj 要读取键的对象。
+ * @returns {string[]} 自有键数组。
+ */
+function _fsuGetObjectKeys(obj) {
+    var result = [];
+    var key = "";
+
+    if (!obj) {
+        return result;
+    }
+
+    for (key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            result.push(key);
+        }
+    }
+
+    return result;
+}
+
+/**
+ * 把键值对象转换为值数组。
+ *
+ * @private
+ * @param {Object} obj 要转换的对象。
+ * @returns {Array} 值数组。
+ */
+function _fsuObjectToArray(obj) {
+    var keys = _fsuGetObjectKeys(obj);
+    var result = [];
+    var i = 0;
+
+    for (i = 0; i < keys.length; i++) {
+        result.push(obj[keys[i]]);
+    }
+
+    return result;
+}
+
+/**
+ * 把日期值转换为时间戳。
+ *
+ * @private
+ * @param {*} value 日期对象、日期字符串或可解析日期值。
+ * @returns {number} 时间戳；无法解析时返回 -1。
+ */
+function _fsuDateToTimestamp(value) {
+    if (!value) {
+        return -1;
+    }
+
+    try {
+        if (Object.prototype.toString.call(value) === "[object Date]") {
+            return value.getTime();
+        }
+
+        var parsed = new Date(value);
+        return isNaN(parsed.getTime()) ? -1 : parsed.getTime();
+    } catch (error) {
+        return -1;
+    }
 }
 
 /**

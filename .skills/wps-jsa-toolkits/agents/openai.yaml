@@ -1,0 +1,4 @@
+interface:
+  display_name: "WPS JSA Toolkits"
+  short_description: "Maintain WPS JSA macro utilities and docs"
+  default_prompt: "Use $wps-jsa-toolkits to update WPS JSA macro utilities and their documentation."
